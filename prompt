@@ -1,0 +1,275 @@
+You are assisting me on my final-year engineering project called WearTwin.
+
+IMPORTANT: Do NOT redesign the project from scratch. First inspect the existing repository thoroughly and understand what is already implemented before suggesting changes.
+
+PROJECT:
+WearTwin is a wearable multimodal physiological Digital Twin system intended for:
+1. Operational readiness monitoring
+2. Casualty deterioration / triage support
+3. Recovery and rehabilitation monitoring
+
+The system is primarily an ESP32-based wearable/test subject with possible Raspberry Pi edge processing.
+
+HIGH-LEVEL ARCHITECTURE:
+
+Wearable ESP32
+    |
+    | ECG / PPG / SpO2 / IMU / temperature
+    v
+Raspberry Pi / Edge Gateway
+    |
+    +-- data ingestion
+    +-- synchronization
+    +-- signal processing
+    +-- feature extraction
+    +-- AI/state estimation
+    +-- Digital Twin
+    +-- decision engine
+    +-- dashboard
+
+My role:
+- I am the project lead and make the final architectural decisions.
+- I want to understand the implementation, not just copy-paste code.
+- Prefer explanations from first principles and explain WHY a design is being used.
+- I am strongest in C/C++, Embedded C, ESP32, STM32, DSP and embedded architecture.
+- I specifically care about low-level implementation details.
+
+CURRENT IMPORTANT DESIGN DECISIONS:
+
+1. ECG
+- ECG is sampled at 250 Hz.
+- Current analysis uses 2000 samples = 8 seconds.
+- I prefer batch/window-based graphical analysis rather than blindly processing one sample at a time.
+- Streaming acquisition can still exist, but analysis is performed on windows.
+- We have a custom Wokwi ECG simulator chip: ecgsim.chip.c.
+- The ECG simulator models different BPM states and produces a waveform rather than directly giving BPM to the ESP32.
+- BPM should be estimated from ECG peaks by the ESP32/software.
+- The simulator uses a heartbeat phase model and explicit ECG morphology.
+- Be careful about T-wave false detection when detecting R peaks.
+
+2. ECG signal processing
+Current intended pipeline is roughly:
+
+250 Hz ECG
+    ↓
+collect 2000 samples
+    ↓
+DSP filtering
+    ↓
+R-peak detection
+    ↓
+RR intervals
+    ↓
+BPM / HR features
+
+We have experimented with:
+- 2nd-order Butterworth LPF
+- HPF / baseline-wander removal
+- 50 Hz interference
+- FIR notch filtering
+- derivative-based detection
+- thresholding
+- local maxima
+- refractory/minimum-distance logic
+- monotonic deque as a candidate-search building block
+- predictive R-peak search based on previous RR intervals
+
+Do NOT blindly add huge FIR filters such as 1501 taps to an ESP32. Consider computational cost and embedded suitability.
+
+3. Current ECG detector thinking
+We were exploring an algorithm like:
+
+2000 samples
+    ↓
+filter entire buffer
+    ↓
+find first reliable R peak
+    ↓
+estimate RR
+    ↓
+predict next R peak
+    ↓
+search around prediction
+    ↓
+find peak
+    ↓
+update RR estimate
+    ↓
+predict next peak
+
+This is NOT Monte Carlo. It is adaptive/predictive peak tracking.
+
+A monotonic deque may be used as a building block for efficient sliding-window maximum search, but it is NOT by itself an ECG R-peak detector.
+
+Keep these concepts separate:
+- amplitude threshold → is a candidate strong enough?
+- local maximum → is this actually a peak?
+- refractory/minimum distance → is this a new heartbeat?
+- RR estimate → where should the next peak approximately occur?
+- fallback/reacquisition → what happens if prediction fails?
+
+4. IMU
+We use MPU6050.
+Current concept uses:
+- accelerometer angle
+- gyroscope rate
+- 2-state Kalman filter estimating angle + gyro bias.
+
+5. PPG / SpO2
+We are currently designing a custom Wokwi sensor chip analogous to ecgsim.chip.c.
+
+IMPORTANT:
+The chip should NOT simply output an SpO2 number.
+
+It should simulate sensor-level signals:
+- RED PPG
+- IR PPG
+
+The ESP32 should then perform:
+AC/DC extraction
+    ↓
+ratio-of-ratios
+    ↓
+SpO2 estimation
+
+Basic prototype relationship:
+
+R = (AC_red / DC_red) / (AC_IR / DC_IR)
+
+A common prototype approximation may be:
+SpO2 ≈ 110 - 25R
+
+BUT this is only a simulation/calibration approximation, NOT a clinical equation.
+
+The PPG should be physiologically correlated with heartbeat timing.
+
+Do NOT make ECG and PPG independent random signals.
+
+Preferred conceptual model:
+
+          HUMAN / CARDIOVASCULAR STATE
+                     |
+          +----------+----------+
+          |                     |
+    heartbeat timing        oxygenation
+          |                     |
+       ECG + PPG             RED/IR
+       
+ECG R peak and PPG pulse should have a configurable physiological delay rather than occurring at exactly the same sample.
+
+HR and SpO2 are separate physiological state variables. Do NOT assume SpO2 is simply a function of BPM.
+
+6. Real-time simulation
+We want the physiological simulator to run continuously in real time.
+
+At 250 Hz:
+
+sample period = 4 ms
+
+A phase accumulator can be used:
+
+phase += bpm / (60.0f * Fs);
+
+if (phase >= 1.0f)
+    phase -= 1.0f;
+
+The same underlying heartbeat timing should drive ECG and PPG.
+
+However:
+
+REAL-TIME SIMULATION != RTOS.
+
+The simulator can first be implemented using a deterministic loop/timer.
+
+Later, the ESP32 application may use FreeRTOS when we have concurrent:
+- ECG/PPG acquisition
+- IMU
+- DSP
+- feature extraction
+- communication
+- Digital Twin updates
+
+7. Wokwi
+We use custom Wokwi chips.
+
+Existing ECG simulator files include:
+- ecgsim.chip.c
+- ecgsim.chip.json
+- wokwi.toml
+
+When modifying Wokwi custom chips:
+DO NOT guess the Wokwi custom-chip API or pin behavior.
+
+Inspect the existing ecgsim implementation and project structure first.
+
+8. Embedded constraints
+This is an embedded engineering project.
+
+Whenever proposing an algorithm, discuss:
+- time complexity
+- memory complexity
+- RAM usage
+- CPU/MAC cost
+- sampling rate
+- latency
+- numerical precision
+- float vs integer considerations
+- whether it is realistic on ESP32
+
+9. Coding style
+I like:
+- separate .h/.c or .h/.cpp files
+- clear structs/classes
+- explicit data flow
+- comments explaining WHY
+- modular architecture
+- embedded-friendly code
+- no unnecessary frameworks/abstractions
+
+If writing C:
+remember that C structs do NOT support C++-style member initialization.
+
+Use fixed-width types such as:
+uint8_t
+uint16_t
+int16_t
+uint32_t
+int32_t
+when appropriate.
+
+Remember:
+.  -> struct object
+-> -> pointer to struct
+
+10. DO NOT DO THIS:
+- Do not rewrite working code unnecessarily.
+- Do not invent project requirements.
+- Do not assume a generic smartwatch architecture.
+- Do not turn everything into AI/ML when deterministic DSP is appropriate.
+- Do not claim something is medically validated.
+- Do not call a simulation clinically accurate.
+- Do not generate random numbers and call them physiological signals.
+- Do not hide computational complexity.
+- Do not give me 500 lines of code when 50 lines will demonstrate the concept.
+- Do not change architecture without explaining the tradeoff.
+
+FIRST TASK:
+Inspect the repository completely.
+
+Identify:
+1. Current directory structure
+2. What is actually implemented
+3. What is incomplete
+4. Current build/run method
+5. Current Wokwi custom chips
+6. Current ECG implementation
+7. Current signal-processing implementation
+8. Current IMU implementation
+9. Current PPG/SpO2 implementation
+10. Current Python/MATLAB/analysis code
+11. Any bugs or architectural inconsistencies
+12. What the NEXT smallest engineering step should be
+
+Do not immediately modify files.
+
+First give me a concise repository assessment and wait for my instruction.
